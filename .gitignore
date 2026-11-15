@@ -1,0 +1,11 @@
+# Local authentication and agent-session artifacts must not be published.
+node_modules/
+.env
+.env.*
+*.key
+*.pem
+*keypair*.json
+transcripts*
+*.session
+*.log
+AGENTS.md
