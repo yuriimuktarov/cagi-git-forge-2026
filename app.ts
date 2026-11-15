@@ -15,6 +15,23 @@ function json(res,code,value,heads={}){const s=code===204?'':JSON.stringify(valu
 function error(res,status,msg='Not Found'){return json(res,status,{message:msg})}
 function repoJSON(r){return {id:r.id,node_id:Buffer.from('Repository:'+r.id).toString('base64'),name:r.name,full_name:`${r.owner}/${r.name}`,owner:{login:r.owner,id:1},private:r.private,description:r.description,default_branch:r.defaultBranch,has_issues:true,html_url:`https://github.com/${r.owner}/${r.name}`,created_at:FIXED_DATE,updated_at:FIXED_DATE}}
 function issueJSON(r,i){return {id:i.id,node_id:Buffer.from('Issue:'+i.id).toString('base64'),number:i.number,title:i.title,body:i.body,state:i.state,labels:i.labels.map(name=>({name,color:r.labels.get(name)?.color||'ffffff'})),user:{login:r.owner},comments:i.comments.length,created_at:FIXED_DATE,updated_at:FIXED_DATE,repository_url:`/api/v3/repos/${r.owner}/${r.name}`}}
+// Reuse the fully encoded response for repeated reads of unchanged unlabeled
+// issues. Compare every field affecting that representation before reusing it.
+// Labeled issues follow the original serializer, so label color changes cannot
+// make a cached response stale. WeakMap prevents retention after deletion.
+const issueWireCache=new WeakMap();
+function issueRead(res,r,i){
+ if(i.labels.length){return json(res,200,issueJSON(r,i))}
+ const cached=issueWireCache.get(i),comments=i.comments.length;
+ if(cached&&cached.title===i.title&&cached.body===i.body&&cached.state===i.state&&cached.comments===comments&&cached.owner===r.owner&&cached.name===r.name){
+   res.writeHead(200,{'content-type':'application/json; charset=utf-8','x-github-request-id':'cagi-request','content-length':cached.wire.length});
+   res.end(cached.wire);return;
+ }
+ const wire=Buffer.from(JSON.stringify(issueJSON(r,i))+'\n');
+ issueWireCache.set(i,{title:i.title,body:i.body,state:i.state,comments,owner:r.owner,name:r.name,wire});
+ res.writeHead(200,{'content-type':'application/json; charset=utf-8','x-github-request-id':'cagi-request','content-length':wire.length});
+ res.end(wire);
+}
 function prJSON(r,p){return {id:p.id,node_id:Buffer.from('PullRequest:'+p.id).toString('base64'),number:p.number,title:p.title,body:p.body,state:p.state,merged:p.merged,merged_at:p.merged?FIXED_DATE:null,merge_commit_sha:p.mergeSha??null,mergeable:!p.merged&&mergeFiles(r,p)!==null,head:{ref:p.head,sha:r.refs.get('refs/heads/'+p.head)||''},base:{ref:p.base,sha:r.refs.get('refs/heads/'+p.base)||''},user:{login:r.owner},created_at:FIXED_DATE}}
 const first=(x,n=1)=>x?.[n]??'';
 function parsePath(p){return p.split('/').filter(Boolean).map(decodeURIComponent)}
@@ -146,7 +163,7 @@ async function request(req,res){let u;try{const host=req.headers.host||'127.0.0.
     if(tail.length===1){if(method==='POST'){const lab=input.labels||[];if(lab.some(l=>!r.labels.has(typeof l==='string'?l:l.name)))return error(res,422,'Unknown label');const i={id:nextId++,number:++r.issueSeq,title:input.title||'',body:input.body||'',state:'open',labels:lab.map(x=>typeof x==='string'?x:x.name),comments:[]};r.issues.push(i);return json(res,201,issueJSON(r,i))}
       if(method==='GET'){let items=r.issues.filter(i=>!u.searchParams.get('state')||u.searchParams.get('state')==='all'||i.state===u.searchParams.get('state'));if(u.searchParams.get('sort')==='created'&&u.searchParams.get('direction')==='desc')items=items.slice().reverse();const [a,h]=linkList(res,items.map(i=>issueJSON(r,i)),u);return json(res,200,a,h)}}
     const i=r.issues.find(i=>i.number===Number(tail[1]));if(!i)return error(res,404);
-    if(tail.length===2){if(method==='GET')return json(res,200,issueJSON(r,i));if(method==='PATCH'){Object.assign(i,{title:input.title??i.title,body:input.body??i.body,state:input.state??i.state});return json(res,200,issueJSON(r,i))}}
+    if(tail.length===2){if(method==='GET')return issueRead(res,r,i);if(method==='PATCH'){Object.assign(i,{title:input.title??i.title,body:input.body??i.body,state:input.state??i.state});return json(res,200,issueJSON(r,i))}}
     if(tail[2]==='comments'){if(method==='POST'){const c={id:nextId++,body:input.body||'',user:{login:r.owner},created_at:FIXED_DATE};i.comments.push(c);return json(res,201,c)}if(method==='GET')return json(res,200,i.comments)}
   }
   if(tail[0]==='pulls'){
